@@ -1,0 +1,616 @@
+{
+  "displayName": "Advanced Customer Onboarding & Support Automation",
+  "trigger": {
+    "name": "trigger",
+    "type": "PIECE_TRIGGER",
+    "valid": true,
+    "displayName": "New Customer Webhook",
+    "settings": {
+      "pieceName": "webhook",
+      "pieceVersion": "0.1.0",
+      "triggerName": "catch_hook",
+      "input": {},
+      "inputUiInfo": {
+        "customizedInputs": {},
+        "lastTestDate": "2024-01-15T10:30:00.000Z"
+      }
+    },
+    "nextAction": {
+      "name": "validate_customer_data",
+      "type": "CODE",
+      "valid": true,
+      "displayName": "Validate & Enrich Customer Data",
+      "settings": {
+        "sourceCode": {
+          "packageJson": "{\"dependencies\": {\"validator\": \"^13.11.0\", \"dayjs\": \"^1.11.0\", \"lodash\": \"^4.17.21\"}}",
+          "code": "const validator = require('validator');\nconst dayjs = require('dayjs');\nconst _ = require('lodash');\n\nexport const code = async (inputs) => {\n  const { customerData } = inputs;\n  \n  // Validate required fields\n  const errors = [];\n  if (!customerData.email || !validator.isEmail(customerData.email)) {\n    errors.push('Invalid email address');\n  }\n  \n  if (!customerData.name || customerData.name.length < 2) {\n    errors.push('Name must be at least 2 characters');\n  }\n  \n  if (!customerData.company) {\n    errors.push('Company name is required');\n  }\n  \n  // Determine customer tier based on plan\n  const tierMapping = {\n    'starter': 'bronze',\n    'professional': 'silver', \n    'enterprise': 'gold',\n    'custom': 'platinum'\n  };\n  \n  const customerTier = tierMapping[customerData.plan?.toLowerCase()] || 'bronze';\n  \n  // Calculate onboarding timeline\n  const onboardingDays = {\n    'bronze': 3,\n    'silver': 5,\n    'gold': 7,\n    'platinum': 10\n  };\n  \n  const completionDate = dayjs().add(onboardingDays[customerTier], 'day').toISOString();\n  \n  return {\n    isValid: errors.length === 0,\n    errors,\n    enrichedCustomer: {\n      ...customerData,\n      tier: customerTier,\n      onboardingCompletionDate: completionDate,\n      signupDate: dayjs().toISOString(),\n      status: 'onboarding',\n      priority: customerTier === 'platinum' || customerTier === 'gold' ? 'high' : 'normal'\n    }\n  };\n};"
+        },
+        "input": {
+          "customerData": "{{trigger.body}}"
+        },
+        "inputUiInfo": {
+          "customizedInputs": {}
+        },
+        "errorHandlingOptions": {
+          "continueOnFailure": {
+            "value": false
+          },
+          "retryOnFailure": {
+            "value": true
+          }
+        }
+      },
+      "nextAction": {
+        "name": "validation_router",
+        "type": "ROUTER",
+        "valid": true,
+        "displayName": "Route Based on Data Validation",
+        "settings": {
+          "executionType": "EXECUTE_FIRST_MATCH",
+          "branches": [
+            {
+              "branchType": "CONDITION",
+              "branchName": "Valid Customer Data",
+              "conditions": [
+                [
+                  {
+                    "firstValue": "{{validate_customer_data.isValid}}",
+                    "operator": "BOOLEAN_IS_TRUE"
+                  }
+                ]
+              ]
+            },
+            {
+              "branchType": "FALLBACK",
+              "branchName": "Invalid Data - Send Error"
+            }
+          ],
+          "inputUiInfo": {
+            "customizedInputs": {}
+          }
+        },
+        "children": [
+          {
+            "name": "create_hubspot_contact",
+            "type": "PIECE",
+            "valid": true,
+            "displayName": "Create HubSpot Contact",
+            "settings": {
+              "pieceName": "hubspot",
+              "pieceVersion": "0.1.0",
+              "actionName": "create_contact",
+              "input": {
+                "authentication": "{{connections.hubspot}}",
+                "email": "{{validate_customer_data.enrichedCustomer.email}}",
+                "firstName": "{{validate_customer_data.enrichedCustomer.name}}",
+                "lastName": "{{validate_customer_data.enrichedCustomer.lastName}}",
+                "company": "{{validate_customer_data.enrichedCustomer.company}}",
+                "phone": "{{validate_customer_data.enrichedCustomer.phone}}",
+                "lifecycleStage": "customer",
+                "leadStatus": "new",
+                "customProperties": {
+                  "customer_tier": "{{validate_customer_data.enrichedCustomer.tier}}",
+                  "signup_date": "{{validate_customer_data.enrichedCustomer.signupDate}}",
+                  "plan": "{{validate_customer_data.enrichedCustomer.plan}}",
+                  "onboarding_completion_date": "{{validate_customer_data.enrichedCustomer.onboardingCompletionDate}}"
+                }
+              },
+              "inputUiInfo": {
+                "customizedInputs": {}
+              },
+              "errorHandlingOptions": {
+                "continueOnFailure": {
+                  "value": true
+                },
+                "retryOnFailure": {
+                  "value": true
+                }
+              }
+            },
+            "nextAction": {
+              "name": "add_to_google_sheets",
+              "type": "PIECE",
+              "valid": true,
+              "displayName": "Log Customer to Google Sheets",
+              "settings": {
+                "pieceName": "google-sheets",
+                "pieceVersion": "0.1.0",
+                "actionName": "append_row",
+                "input": {
+                  "authentication": "{{connections.google_sheets}}",
+                  "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+                  "sheet_id": "Customers",
+                  "values": [
+                    "{{validate_customer_data.enrichedCustomer.signupDate}}",
+                    "{{validate_customer_data.enrichedCustomer.name}}",
+                    "{{validate_customer_data.enrichedCustomer.email}}",
+                    "{{validate_customer_data.enrichedCustomer.company}}",
+                    "{{validate_customer_data.enrichedCustomer.plan}}",
+                    "{{validate_customer_data.enrichedCustomer.tier}}",
+                    "{{validate_customer_data.enrichedCustomer.status}}",
+                    "{{create_hubspot_contact.id}}"
+                  ]
+                },
+                "inputUiInfo": {
+                  "customizedInputs": {}
+                },
+                "errorHandlingOptions": {
+                  "continueOnFailure": {
+                    "value": true
+                  },
+                  "retryOnFailure": {
+                    "value": true
+                  }
+                }
+              },
+              "nextAction": {
+                "name": "create_notion_page",
+                "type": "PIECE",
+                "valid": true,
+                "displayName": "Create Customer Page in Notion",
+                "settings": {
+                  "pieceName": "notion",
+                  "pieceVersion": "0.1.0",
+                  "actionName": "create_page",
+                  "input": {
+                    "authentication": "{{connections.notion}}",
+                    "parent_id": "customer_database_id_here",
+                    "title": "{{validate_customer_data.enrichedCustomer.company}} - {{validate_customer_data.enrichedCustomer.name}}",
+                    "properties": {
+                      "Customer Name": {
+                        "title": [
+                          {
+                            "text": {
+                              "content": "{{validate_customer_data.enrichedCustomer.name}}"
+                            }
+                          }
+                        ]
+                      },
+                      "Company": {
+                        "rich_text": [
+                          {
+                            "text": {
+                              "content": "{{validate_customer_data.enrichedCustomer.company}}"
+                            }
+                          }
+                        ]
+                      },
+                      "Email": {
+                        "email": "{{validate_customer_data.enrichedCustomer.email}}"
+                      },
+                      "Tier": {
+                        "select": {
+                          "name": "{{validate_customer_data.enrichedCustomer.tier}}"
+                        }
+                      },
+                      "Status": {
+                        "select": {
+                          "name": "onboarding"
+                        }
+                      },
+                      "Signup Date": {
+                        "date": {
+                          "start": "{{validate_customer_data.enrichedCustomer.signupDate}}"
+                        }
+                      }
+                    }
+                  },
+                  "inputUiInfo": {
+                    "customizedInputs": {}
+                  },
+                  "errorHandlingOptions": {
+                    "continueOnFailure": {
+                      "value": true
+                    },
+                    "retryOnFailure": {
+                      "value": true
+                    }
+                  }
+                },
+                "nextAction": {
+                  "name": "tier_based_router",
+                  "type": "ROUTER",
+                  "valid": true,
+                  "displayName": "Route by Customer Tier",
+                  "settings": {
+                    "executionType": "EXECUTE_FIRST_MATCH",
+                    "branches": [
+                      {
+                        "branchType": "CONDITION",
+                        "branchName": "Platinum/Gold Tier",
+                        "conditions": [
+                          [
+                            {
+                              "firstValue": "{{validate_customer_data.enrichedCustomer.tier}}",
+                              "secondValue": "platinum",
+                              "operator": "TEXT_EXACTLY_MATCHES",
+                              "caseSensitive": false
+                            }
+                          ],
+                          [
+                            {
+                              "firstValue": "{{validate_customer_data.enrichedCustomer.tier}}",
+                              "secondValue": "gold",
+                              "operator": "TEXT_EXACTLY_MATCHES",
+                              "caseSensitive": false
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "branchType": "CONDITION",
+                        "branchName": "Silver Tier",
+                        "conditions": [
+                          [
+                            {
+                              "firstValue": "{{validate_customer_data.enrichedCustomer.tier}}",
+                              "secondValue": "silver",
+                              "operator": "TEXT_EXACTLY_MATCHES",
+                              "caseSensitive": false
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "branchType": "FALLBACK",
+                        "branchName": "Bronze Tier"
+                      }
+                    ],
+                    "inputUiInfo": {
+                      "customizedInputs": {}
+                    }
+                  },
+                  "children": [
+                    {
+                      "name": "premium_onboarding_sequence",
+                      "type": "PIECE",
+                      "valid": true,
+                      "displayName": "Send Premium Welcome Email",
+                      "settings": {
+                        "pieceName": "sendgrid",
+                        "pieceVersion": "0.1.0",
+                        "actionName": "send_email",
+                        "input": {
+                          "authentication": "{{connections.sendgrid}}",
+                          "to": "{{validate_customer_data.enrichedCustomer.email}}",
+                          "from": "success@company.com",
+                          "subject": "🌟 Welcome to Premium! Your Dedicated Success Manager is Here",
+                          "html": "<h1>Welcome {{validate_customer_data.enrichedCustomer.name}}!</h1><p>Thank you for choosing our {{validate_customer_data.enrichedCustomer.tier}} plan. You've been assigned a dedicated success manager who will contact you within 24 hours.</p><p><strong>Your Success Manager:</strong> premium-success@company.com</p><p><strong>Direct Line:</strong> +1-555-PREMIUM</p><p>We're excited to help {{validate_customer_data.enrichedCustomer.company}} succeed!</p>",
+                          "templateId": "premium_welcome_template"
+                        },
+                        "inputUiInfo": {
+                          "customizedInputs": {}
+                        }
+                      },
+                      "nextAction": {
+                        "name": "create_calendly_link",
+                        "type": "PIECE",
+                        "valid": true,
+                        "displayName": "Create Calendly Onboarding Link",
+                        "settings": {
+                          "pieceName": "calendly",
+                          "pieceVersion": "0.1.0",
+                          "actionName": "create_single_use_link",
+                          "input": {
+                            "authentication": "{{connections.calendly}}",
+                            "event_type": "premium-onboarding-call",
+                            "invitee_email": "{{validate_customer_data.enrichedCustomer.email}}",
+                            "invitee_name": "{{validate_customer_data.enrichedCustomer.name}}"
+                          },
+                          "inputUiInfo": {
+                            "customizedInputs": {}
+                          }
+                        },
+                        "nextAction": {
+                          "name": "notify_success_team_slack",
+                          "type": "PIECE",
+                          "valid": true,
+                          "displayName": "Notify Success Team in Slack",
+                          "settings": {
+                            "pieceName": "slack",
+                            "pieceVersion": "0.2.1",
+                            "actionName": "send_channel_message",
+                            "input": {
+                              "authentication": "{{connections.slack}}",
+                              "channel": "customer-success",
+                              "text": "🌟 *NEW PREMIUM CUSTOMER ALERT* 🌟\n\n*Customer:* {{validate_customer_data.enrichedCustomer.name}}\n*Company:* {{validate_customer_data.enrichedCustomer.company}}\n*Email:* {{validate_customer_data.enrichedCustomer.email}}\n*Tier:* {{validate_customer_data.enrichedCustomer.tier}}\n*Plan:* {{validate_customer_data.enrichedCustomer.plan}}\n\n*HubSpot Contact:* https://app.hubspot.com/contacts/{{create_hubspot_contact.id}}\n*Calendly Link:* {{create_calendly_link.scheduling_url}}\n\n@channel - Please assign a success manager within 4 hours!",
+                              "username": "Customer Success Bot",
+                              "blocks": [
+                                {
+                                  "type": "section",
+                                  "text": {
+                                    "type": "mrkdwn",
+                                    "text": "🌟 *NEW PREMIUM CUSTOMER ALERT* 🌟"
+                                  }
+                                },
+                                {
+                                  "type": "section",
+                                  "fields": [
+                                    {
+                                      "type": "mrkdwn",
+                                      "text": "*Customer:*\n{{validate_customer_data.enrichedCustomer.name}}"
+                                    },
+                                    {
+                                      "type": "mrkdwn",
+                                      "text": "*Company:*\n{{validate_customer_data.enrichedCustomer.company}}"
+                                    },
+                                    {
+                                      "type": "mrkdwn",
+                                      "text": "*Tier:*\n{{validate_customer_data.enrichedCustomer.tier}}"
+                                    },
+                                    {
+                                      "type": "mrkdwn",
+                                      "text": "*Plan:*\n{{validate_customer_data.enrichedCustomer.plan}}"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "type": "actions",
+                                  "elements": [
+                                    {
+                                      "type": "button",
+                                      "text": {
+                                        "type": "plain_text",
+                                        "text": "View in HubSpot"
+                                      },
+                                      "url": "https://app.hubspot.com/contacts/{{create_hubspot_contact.id}}"
+                                    },
+                                    {
+                                      "type": "button",
+                                      "text": {
+                                        "type": "plain_text",
+                                        "text": "Calendly Link"
+                                      },
+                                      "url": "{{create_calendly_link.scheduling_url}}"
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            "inputUiInfo": {
+                              "customizedInputs": {}
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "name": "silver_onboarding_sequence",
+                      "type": "PIECE",
+                      "valid": true,
+                      "displayName": "Send Silver Welcome Email",
+                      "settings": {
+                        "pieceName": "sendgrid",
+                        "pieceVersion": "0.1.0",
+                        "actionName": "send_email",
+                        "input": {
+                          "authentication": "{{connections.sendgrid}}",
+                          "to": "{{validate_customer_data.enrichedCustomer.email}}",
+                          "from": "welcome@company.com",
+                          "subject": "⚡ Welcome to Professional! Let's Get You Started",
+                          "html": "<h1>Welcome {{validate_customer_data.enrichedCustomer.name}}!</h1><p>Thank you for choosing our Professional plan. We've prepared a comprehensive onboarding guide to help you get the most out of your subscription.</p><p><strong>Next Steps:</strong></p><ul><li>Check your email for onboarding resources</li><li>Join our Professional users community</li><li>Schedule a group onboarding session</li></ul><p>Questions? Reply to this email or visit our help center.</p>",
+                          "templateId": "silver_welcome_template"
+                        },
+                        "inputUiInfo": {
+                          "customizedInputs": {}
+                        }
+                      },
+                      "nextAction": {
+                        "name": "add_to_intercom",
+                        "type": "PIECE",
+                        "valid": true,
+                        "displayName": "Create Intercom User",
+                        "settings": {
+                          "pieceName": "intercom",
+                          "pieceVersion": "0.1.0",
+                          "actionName": "create_user",
+                          "input": {
+                            "authentication": "{{connections.intercom}}",
+                            "email": "{{validate_customer_data.enrichedCustomer.email}}",
+                            "name": "{{validate_customer_data.enrichedCustomer.name}}",
+                            "customAttributes": {
+                              "company": "{{validate_customer_data.enrichedCustomer.company}}",
+                              "plan": "{{validate_customer_data.enrichedCustomer.plan}}",
+                              "tier": "{{validate_customer_data.enrichedCustomer.tier}}",
+                              "signup_date": "{{validate_customer_data.enrichedCustomer.signupDate}}"
+                            },
+                            "tags": ["professional", "new-customer", "onboarding"]
+                          },
+                          "inputUiInfo": {
+                            "customizedInputs": {}
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "name": "bronze_onboarding_sequence",
+                      "type": "PIECE",
+                      "valid": true,
+                      "displayName": "Send Bronze Welcome Email",
+                      "settings": {
+                        "pieceName": "sendgrid",
+                        "pieceVersion": "0.1.0",
+                        "actionName": "send_email",
+                        "input": {
+                          "authentication": "{{connections.sendgrid}}",
+                          "to": "{{validate_customer_data.enrichedCustomer.email}}",
+                          "from": "welcome@company.com",
+                          "subject": "🚀 Welcome! Your Journey Starts Here",
+                          "html": "<h1>Welcome {{validate_customer_data.enrichedCustomer.name}}!</h1><p>Thank you for choosing our Starter plan. We're excited to help you get started on your journey.</p><p><strong>Getting Started:</strong></p><ul><li>Access our quick start guide</li><li>Join our community forum</li><li>Watch our video tutorials</li></ul><p>Need help? Check out our extensive help documentation or contact support.</p>",
+                          "templateId": "bronze_welcome_template"
+                        },
+                        "inputUiInfo": {
+                          "customizedInputs": {}
+                        }
+                      },
+                      "nextAction": {
+                        "name": "add_to_mailchimp_list",
+                        "type": "PIECE",
+                        "valid": true,
+                        "displayName": "Add to MailChimp Onboarding List",
+                        "settings": {
+                          "pieceName": "mailchimp",
+                          "pieceVersion": "0.1.0",
+                          "actionName": "add_member_to_list",
+                          "input": {
+                            "authentication": "{{connections.mailchimp}}",
+                            "list_id": "starter_onboarding_list",
+                            "email_address": "{{validate_customer_data.enrichedCustomer.email}}",
+                            "status": "subscribed",
+                            "merge_fields": {
+                              "FNAME": "{{validate_customer_data.enrichedCustomer.name}}",
+                              "COMPANY": "{{validate_customer_data.enrichedCustomer.company}}",
+                              "PLAN": "{{validate_customer_data.enrichedCustomer.plan}}",
+                              "SIGNUP": "{{validate_customer_data.enrichedCustomer.signupDate}}"
+                            },
+                            "tags": ["new-customer", "starter", "onboarding"]
+                          },
+                          "inputUiInfo": {
+                            "customizedInputs": {}
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "nextAction": {
+                    "name": "create_onboarding_tasks",
+                    "type": "LOOP_ON_ITEMS",
+                    "valid": true,
+                    "displayName": "Create Onboarding Tasks",
+                    "settings": {
+                      "items": "{{validate_customer_data.enrichedCustomer.tier === 'platinum' || validate_customer_data.enrichedCustomer.tier === 'gold' ? ['Setup premium features', 'Schedule success call', 'Assign dedicated manager', 'Create custom integration plan'] : validate_customer_data.enrichedCustomer.tier === 'silver' ? ['Setup professional features', 'Add to group onboarding', 'Send resource pack'] : ['Send welcome resources', 'Add to community']}}",
+                      "inputUiInfo": {
+                        "customizedInputs": {}
+                      }
+                    },
+                    "firstLoopAction": {
+                      "name": "create_asana_task",
+                      "type": "PIECE",
+                      "valid": true,
+                      "displayName": "Create Task in Asana",
+                      "settings": {
+                        "pieceName": "asana",
+                        "pieceVersion": "0.1.0",
+                        "actionName": "create_task",
+                        "input": {
+                          "authentication": "{{connections.asana}}",
+                          "project": "customer-onboarding",
+                          "name": "{{loop.item}} - {{validate_customer_data.enrichedCustomer.company}}",
+                          "notes": "Customer: {{validate_customer_data.enrichedCustomer.name}}\nCompany: {{validate_customer_data.enrichedCustomer.company}}\nEmail: {{validate_customer_data.enrichedCustomer.email}}\nTier: {{validate_customer_data.enrichedCustomer.tier}}\nPlan: {{validate_customer_data.enrichedCustomer.plan}}\n\nHubSpot Contact: {{create_hubspot_contact.id}}",
+                          "assignee": "{{validate_customer_data.enrichedCustomer.tier === 'platinum' || validate_customer_data.enrichedCustomer.tier === 'gold' ? 'premium-success@company.com' : 'onboarding@company.com'}}",
+                          "due_date": "{{validate_customer_data.enrichedCustomer.onboardingCompletionDate}}",
+                          "priority": "{{validate_customer_data.enrichedCustomer.priority}}"
+                        },
+                        "inputUiInfo": {
+                          "customizedInputs": {}
+                        },
+                        "errorHandlingOptions": {
+                          "continueOnFailure": {
+                            "value": true
+                          },
+                          "retryOnFailure": {
+                            "value": true
+                          }
+                        }
+                      }
+                    },
+                    "nextAction": {
+                      "name": "schedule_follow_up",
+                      "type": "PIECE",
+                      "valid": true,
+                      "displayName": "Schedule Follow-up Automation",
+                      "settings": {
+                        "pieceName": "schedule",
+                        "pieceVersion": "0.0.2",
+                        "actionName": "create_delayed_job",
+                        "input": {
+                          "delay_days": "{{validate_customer_data.enrichedCustomer.tier === 'platinum' ? 1 : validate_customer_data.enrichedCustomer.tier === 'gold' ? 2 : validate_customer_data.enrichedCustomer.tier === 'silver' ? 3 : 7}}",
+                          "webhook_url": "https://your-activepieces-instance.com/api/v1/webhooks/follow-up",
+                          "payload": {
+                            "customer_id": "{{create_hubspot_contact.id}}",
+                            "customer_email": "{{validate_customer_data.enrichedCustomer.email}}",
+                            "customer_name": "{{validate_customer_data.enrichedCustomer.name}}",
+                            "tier": "{{validate_customer_data.enrichedCustomer.tier}}",
+                            "follow_up_type": "onboarding_check"
+                          }
+                        },
+                        "inputUiInfo": {
+                          "customizedInputs": {}
+                        }
+                      },
+                      "nextAction": {
+                        "name": "final_notification",
+                        "type": "PIECE",
+                        "valid": true,
+                        "displayName": "Send Final Success Notification",
+                        "settings": {
+                          "pieceName": "slack",
+                          "pieceVersion": "0.2.1",
+                          "actionName": "send_channel_message",
+                          "input": {
+                            "authentication": "{{connections.slack}}",
+                            "channel": "general",
+                            "text": "✅ *Customer Onboarding Complete*\n\n*Customer:* {{validate_customer_data.enrichedCustomer.name}} ({{validate_customer_data.enrichedCustomer.company}})\n*Tier:* {{validate_customer_data.enrichedCustomer.tier}}\n*Plan:* {{validate_customer_data.enrichedCustomer.plan}}\n\n*Actions Completed:*\n• HubSpot contact created\n• Google Sheets logged\n• Notion page created\n• Welcome email sent\n• Onboarding tasks created\n• Follow-up scheduled\n\n*Next Follow-up:* {{schedule_follow_up.scheduled_date}}"
+                          },
+                          "inputUiInfo": {
+                            "customizedInputs": {}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "send_error_notification",
+            "type": "PIECE",
+            "valid": true,
+            "displayName": "Send Data Validation Error",
+            "settings": {
+              "pieceName": "slack",
+              "pieceVersion": "0.2.1",
+              "actionName": "send_channel_message",
+              "input": {
+                "authentication": "{{connections.slack}}",
+                "channel": "errors",
+                "text": "❌ *Customer Data Validation Failed*\n\n*Errors:*\n{{validate_customer_data.errors}}\n\n*Raw Data:*\n```{{trigger.body}}```\n\nPlease check the webhook payload and fix the data source.",
+                "username": "Validation Bot"
+              },
+              "inputUiInfo": {
+                "customizedInputs": {}
+              }
+            },
+            "nextAction": {
+              "name": "log_error_to_sheets",
+              "type": "PIECE",
+              "valid": true,
+              "displayName": "Log Error to Google Sheets",
+              "settings": {
+                "pieceName": "google-sheets",
+                "pieceVersion": "0.1.0",
+                "actionName": "append_row",
+                "input": {
+                  "authentication": "{{connections.google_sheets}}",
+                  "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+                  "sheet_id": "Errors",
+                  "values": [
+                    "{{trigger.timestamp}}",
+                    "Customer Data Validation",
+                    "{{validate_customer_data.errors}}",
+                    "{{trigger.body}}",
+                    "webhook"
+                  ]
+                },
+                "inputUiInfo": {
+                  "customizedInputs": {}
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
