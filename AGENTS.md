@@ -30,6 +30,8 @@ See `package.json` scripts for additional commands (CLI, piece creation, i18n).
 
 ### Gotchas
 
+- **IPv6 issue with `localhost`**: Node.js 18 resolves `localhost` to IPv6 `::1` first, but the Vite dev server only listens on IPv4 `0.0.0.0`. This causes the backend's AI proxy (used by Agents) to fail with `ECONNREFUSED ::1:4200`. Fix: change `AP_FRONTEND_URL` in `packages/server/api/.env` from `http://localhost:4200` to `http://127.0.0.1:4200`.
 - The backend builds dev pieces on first startup, which takes ~30-60 seconds. Wait for the `✨ Changes are ready!` log message before testing.
 - The Vite frontend TypeScript checker may show `ERROR` with `Found 0 errors` — this is normal (the checker plugin logs "ERROR" as a category label even when clean).
 - The `husky` pre-commit hook runs `commit-msg` validation. Commit messages should follow conventional commits format.
+- **Agents feature**: To use Agents, you must first configure an OpenAI API key under Platform Admin > Setup > AI. The "Invent an Agent" creation flow calls OpenAI to enhance the prompt.
