@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "displayName": "Slack Image → Gemini Description → Slack Reply",
+  "state": "DRAFT",
+  "trigger": {
+    "type": "PIECE",
+    "name": "slack_trigger",
+    "pieceName": "slack",
+    "triggerName": "new_message_in_channel",
+    "pieceVersion": ">=0.20.0",
+    "input": {
+      "channel": "REPLACE_WITH_CHANNEL_ID",
+      "include_bot_messages": false
+    },
+    "connections": {
+      "slack": "REPLACE_WITH_SLACK_CONNECTION_ID"
+    }
+  },
+  "steps": {
+    "download_and_encode": {
+      "type": "CODE",
+      "name": "download_and_encode",
+      "input": {
+        "props": {
+          "image_url": "{{ trigger.event.files[0].url_private }}",
+          "slack_bot_token": "REPLACE_WITH_SLACK_BOT_TOKEN"
+        },
+        "code": "async ({ props, steps }) => {\n  const imageUrl = props.image_url || (steps?.trigger?.event?.files?.[0]?.url_private ?? '');\n  const token = props.slack_bot_token;\n  if (!imageUrl) {\n    return { skipped: true, reason: 'No image in message.' };\n  }\n  if (!token) {\n    throw new Error('Missing Slack bot token. Set slack_bot_token prop.');\n  }\n  const res = await fetch(imageUrl, { headers: { Authorization: `Bearer ${token}` } });\n  if (!res.ok) {\n    throw new Error(`Failed to download image: ${res.status} ${res.statusText}`);\n  }\n  const arrayBuffer = await res.arrayBuffer();\n  const mimeType = res.headers.get('content-type') || 'image/jpeg';\n  const base64 = Buffer.from(arrayBuffer).toString('base64');\n  return { base64, mimeType };\n}"
+      },
+      "nextAction": "gemini_request"
+    },
+    "gemini_request": {
+      "type": "PIECE",
+      "name": "gemini_request",
+      "pieceName": "http",
+      "actionName": "send_request",
+      "pieceVersion": ">=0.20.0",
+      "input": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=REPLACE_WITH_GEMINI_API_KEY",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "contents": [
+            {
+              "parts": [
+                {
+                  "text": "Describe this image clearly and concisely for a general audience."
+                },
+                {
+                  "inline_data": {
+                    "mime_type": "{{ steps.download_and_encode.output.mimeType }}",
+                    "data": "{{ steps.download_and_encode.output.base64 }}"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "bodyType": "JSON"
+      },
+      "nextAction": "slack_post"
+    },
+    "slack_post": {
+      "type": "PIECE",
+      "name": "slack_post",
+      "pieceName": "slack",
+      "actionName": "send_message",
+      "pieceVersion": ">=0.20.0",
+      "input": {
+        "channel": "{{ trigger.event.channel }}",
+        "text": "🖼️ Image description:\n{{ steps.gemini_request.output.body.candidates[0].content.parts[0].text }}"
+      },
+      "connections": {
+        "slack": "REPLACE_WITH_SLACK_CONNECTION_ID"
+      }
+    }
+  }
+}
+
