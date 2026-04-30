@@ -8,6 +8,7 @@ import { PlatformAnalyticsReportEntity } from '../analytics/platform-analytics-r
 import { AppConnectionEntity } from '../app-connection/app-connection.entity'
 import { UserIdentityEntity } from '../authentication/user-identity/user-identity-entity'
 import { ChatConversationEntity } from '../chat/chat-conversation-entity'
+import { ChatFeedbackEntity } from '../chat/chat-feedback-entity'
 import { AlertEntity } from '../ee/alerts/alerts-entity'
 import { ApiKeyEntity } from '../ee/api-keys/api-key-entity'
 import { AppCredentialEntity } from '../ee/app-credentials/app-credentials.entity'
@@ -102,6 +103,7 @@ function getEntities(): EntitySchema<unknown>[] {
         KnowledgeBaseFileEntity,
         KnowledgeBaseChunkEntity,
         ChatConversationEntity,
+        ChatFeedbackEntity,
         TriggerSourceEntity,
         UserBadgeEntity,
         WaitpointEntity,

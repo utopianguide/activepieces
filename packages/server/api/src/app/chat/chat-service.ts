@@ -8,6 +8,7 @@ import {
     ALLOWED_CHAT_MODELS_BY_PROVIDER,
     apId,
     ChatConversation,
+    ChatFeedback,
     ChatHistoryMessage,
     ChatHistoryToolCall,
     CreateChatConversationRequest,
@@ -16,10 +17,12 @@ import {
     isNil,
     SeekPage,
     spreadIfDefined,
+    SubmitChatFeedbackRequest,
     tryCatch,
     UpdateChatConversationRequest,
 } from '@activepieces/shared'
 import { createMCPClient } from '@ai-sdk/mcp'
+import { trace } from '@opentelemetry/api'
 import { ModelMessage, stepCountIs, streamText } from 'ai'
 import { FastifyBaseLogger } from 'fastify'
 import { aiProviderService } from '../ai/ai-provider-service'
@@ -32,11 +35,14 @@ import { AppSystemProp } from '../helper/system/system-props'
 import { mcpServerService } from '../mcp/mcp-service'
 import { projectService } from '../project/project-service'
 import { ChatConversationEntity } from './chat-conversation-entity'
+import { ChatFeedbackEntity } from './chat-feedback-entity'
 import { buildUserContentWithFiles } from './chat-file-utils'
+import { chatLangfuse } from './chat-langfuse'
 import { createChatModel } from './chat-model-factory'
 import { createChatTools } from './chat-tools'
 
 const conversationRepo = repoFactory(ChatConversationEntity)
+const feedbackRepo = repoFactory(ChatFeedbackEntity)
 
 const MAX_STEPS = 30
 
@@ -158,6 +164,8 @@ export const chatService = (log: FastifyBaseLogger) => ({
             }
         }
 
+        const langfuseEnabled = chatLangfuse.isReady()
+
         try {
             const result = streamText({
                 model,
@@ -165,16 +173,36 @@ export const chatService = (log: FastifyBaseLogger) => ({
                 messages: allMessages,
                 tools,
                 stopWhen: stepCountIs(MAX_STEPS),
+                experimental_telemetry: {
+                    isEnabled: langfuseEnabled,
+                    recordInputs: true,
+                    recordOutputs: true,
+                    functionId: 'chat.send-message',
+                    metadata: {
+                        userId,
+                        sessionId: conversationId,
+                        projectId,
+                        platformId,
+                        modelName,
+                        provider: providerConfig.provider,
+                        langfuseTags: ['chat', `model:${modelName}`, `provider:${providerConfig.provider}`],
+                    },
+                },
                 onStepFinish: ({ finishReason, usage }) => {
                     log.debug({ conversationId, finishReason, usage }, 'Chat step finished')
                 },
                 onFinish: async ({ response, usage }) => {
                     const updatedMessages = [...allMessages, ...response.messages]
+                    const activeTraceId = langfuseEnabled
+                        ? trace.getActiveSpan()?.spanContext().traceId
+                        : undefined
+
                     try {
                         await conversationRepo().update(conversationId, {
                             messages: updatedMessages,
                             ...(pendingTitle ? { title: pendingTitle } : {}),
                             ...(isNil(conversation.modelName) ? { modelName } : {}),
+                            ...(activeTraceId ? { lastAssistantTraceId: activeTraceId } : {}),
                         })
                     }
                     catch (saveErr) {
@@ -186,6 +214,7 @@ export const chatService = (log: FastifyBaseLogger) => ({
                         inputTokens: usage.inputTokens,
                         outputTokens: usage.outputTokens,
                         provider: providerConfig.provider,
+                        traceId: activeTraceId,
                     }, 'Chat message completed')
                 },
                 onError: ({ error }) => {
@@ -199,6 +228,31 @@ export const chatService = (log: FastifyBaseLogger) => ({
             await closeMcpClient()
             throw err
         }
+    },
+
+    async submitFeedback({ conversationId, projectId, userId, request }: SubmitFeedbackParams): Promise<ChatFeedback> {
+        const conversation = await this.getConversationOrThrow({ id: conversationId, projectId, userId })
+
+        const traceId = conversation.lastAssistantTraceId ?? null
+        const comment = request.comment ?? null
+
+        const now = new Date().toISOString()
+        const feedback: ChatFeedback = {
+            id: apId(),
+            created: now,
+            updated: now,
+            projectId,
+            userId,
+            conversationId,
+            traceId,
+            value: request.value,
+            comment,
+        }
+        await feedbackRepo().save(feedback)
+
+        void sendFeedbackScoreToLangfuse({ feedback, log })
+
+        return feedback
     },
 
 })
@@ -367,6 +421,33 @@ function buildAgentSystemPrompt({ projectName, projectId, frontendUrl }: {
         .replace('{{PROJECT_URL}}', projectUrl)
 }
 
+async function sendFeedbackScoreToLangfuse({ feedback, log }: {
+    feedback: ChatFeedback
+    log: FastifyBaseLogger
+}): Promise<void> {
+    const { traceId } = feedback
+    if (isNil(traceId)) {
+        return
+    }
+    const client = chatLangfuse.getClient()
+    if (isNil(client)) {
+        return
+    }
+    const { error } = await tryCatch(async () => {
+        client.score({
+            id: `chat-feedback-${traceId}`,
+            traceId,
+            name: 'user-feedback',
+            value: feedback.value,
+            comment: feedback.comment ?? undefined,
+        })
+        await client.flushAsync()
+    })
+    if (error) {
+        log.warn({ err: error, conversationId: feedback.conversationId, traceId }, 'Failed to send feedback score to Langfuse')
+    }
+}
+
 type CreateConversationParams = {
     projectId: string
     userId: string
@@ -397,6 +478,13 @@ type SendMessageParams = {
     platformId: string
     content: string
     files?: Array<{ name: string, mimeType: string, data: string }>
+}
+
+type SubmitFeedbackParams = {
+    conversationId: string
+    projectId: string
+    userId: string
+    request: SubmitChatFeedbackRequest
 }
 
 type SendMessageResult = {

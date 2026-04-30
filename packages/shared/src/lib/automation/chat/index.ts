@@ -30,6 +30,7 @@ export const ChatConversation = z.object({
     title: Nullable(z.string()),
     modelName: Nullable(z.string()),
     messages: z.array(z.record(z.string(), z.unknown())).default([]),
+    lastAssistantTraceId: Nullable(z.string()).optional(),
 })
 export type ChatConversation = z.infer<typeof ChatConversation>
 
@@ -53,6 +54,26 @@ export const SendChatMessageRequest = z.object({
     { message: formErrors.messageRequiresContentOrFiles },
 )
 export type SendChatMessageRequest = z.infer<typeof SendChatMessageRequest>
+
+export const ChatFeedbackValue = z.union([z.literal(0), z.literal(1)])
+export type ChatFeedbackValue = z.infer<typeof ChatFeedbackValue>
+
+export const SubmitChatFeedbackRequest = z.object({
+    value: ChatFeedbackValue,
+    comment: z.string().max(2000).optional(),
+})
+export type SubmitChatFeedbackRequest = z.infer<typeof SubmitChatFeedbackRequest>
+
+export const ChatFeedback = z.object({
+    ...BaseModelSchema,
+    projectId: z.string(),
+    userId: z.string(),
+    conversationId: z.string(),
+    traceId: Nullable(z.string()),
+    value: ChatFeedbackValue,
+    comment: Nullable(z.string()),
+})
+export type ChatFeedback = z.infer<typeof ChatFeedback>
 
 export type ChatHistoryToolCall = {
     toolCallId: string

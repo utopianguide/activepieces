@@ -1,5 +1,13 @@
+import { useMutation } from '@tanstack/react-query';
 import { t } from 'i18next';
-import { Check, Copy, Paperclip, RefreshCw } from 'lucide-react';
+import {
+  Check,
+  Copy,
+  Paperclip,
+  RefreshCw,
+  ThumbsDown,
+  ThumbsUp,
+} from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   forwardRef,
@@ -20,6 +28,7 @@ import {
   ReasoningContent,
   ReasoningTrigger,
 } from '@/components/prompt-kit/reasoning';
+import { chatApi } from '@/features/chat/lib/chat-api';
 import { ChatUIMessage } from '@/features/chat/lib/chat-types';
 import { cn } from '@/lib/utils';
 
@@ -31,6 +40,7 @@ import { ToolCallGroup } from './tool-call-group';
 
 export function ChatMessage({
   message,
+  conversationId,
   isStreaming,
   isLastMessage = false,
   onRetry,
@@ -39,6 +49,7 @@ export function ChatMessage({
   onPieceConnected,
 }: {
   message: ChatUIMessage;
+  conversationId?: string | null;
   isStreaming: boolean;
   isLastMessage?: boolean;
   onRetry: () => void;
@@ -53,6 +64,7 @@ export function ChatMessage({
   return (
     <AssistantMessage
       message={message}
+      conversationId={conversationId}
       isStreaming={isStreaming}
       isLastMessage={isLastMessage}
       onRetry={onRetry}
@@ -132,6 +144,7 @@ export function UserMessage({
 
 export function AssistantMessage({
   message,
+  conversationId,
   isStreaming,
   isLastMessage = false,
   onRetry,
@@ -140,6 +153,7 @@ export function AssistantMessage({
   onPieceConnected,
 }: {
   message: ChatUIMessage;
+  conversationId?: string | null;
   isStreaming: boolean;
   isLastMessage?: boolean;
   onRetry: () => void;
@@ -247,6 +261,9 @@ export function AssistantMessage({
                     <RefreshCw className="h-3.5 w-3.5" />
                   </button>
                 </MessageAction>
+                {isLastMessage && conversationId && (
+                  <FeedbackButtons conversationId={conversationId} />
+                )}
                 {hasThoughts && thinkingSeconds >= 0.1 && (
                   <MessageAction
                     tooltip={
@@ -353,6 +370,55 @@ function useThinkingTimer(isActive: boolean): number {
 function formatThinkingTime({ seconds }: { seconds: number }): string {
   const rounded = Math.round(seconds * 10) / 10;
   return Number.isInteger(rounded) ? `${rounded}s` : `${rounded.toFixed(1)}s`;
+}
+
+function FeedbackButtons({ conversationId }: { conversationId: string }) {
+  const [selected, setSelected] = useState<0 | 1 | null>(null);
+
+  const submitFeedback = useMutation({
+    mutationFn: ({ value }: { value: 0 | 1 }) =>
+      chatApi.submitFeedback(conversationId, { value }),
+  });
+
+  const handleClick = (value: 0 | 1) => {
+    setSelected(value);
+    submitFeedback.mutate({ value });
+  };
+
+  return (
+    <>
+      <MessageAction tooltip={t('Helpful')}>
+        <button
+          type="button"
+          onClick={() => handleClick(1)}
+          className={cn(
+            'p-1 rounded-md transition-colors hover:bg-muted',
+            selected === 1
+              ? 'text-foreground bg-muted'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+          aria-pressed={selected === 1}
+        >
+          <ThumbsUp className="h-3.5 w-3.5" />
+        </button>
+      </MessageAction>
+      <MessageAction tooltip={t('Not helpful')}>
+        <button
+          type="button"
+          onClick={() => handleClick(0)}
+          className={cn(
+            'p-1 rounded-md transition-colors hover:bg-muted',
+            selected === 0
+              ? 'text-foreground bg-muted'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+          aria-pressed={selected === 0}
+        >
+          <ThumbsDown className="h-3.5 w-3.5" />
+        </button>
+      </MessageAction>
+    </>
+  );
 }
 
 const CopyIconButton = forwardRef<

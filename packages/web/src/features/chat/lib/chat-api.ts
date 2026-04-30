@@ -1,8 +1,10 @@
 import {
   type ChatHistoryMessage,
   ChatConversation,
+  ChatFeedback,
   CreateChatConversationRequest,
   SeekPage,
+  SubmitChatFeedbackRequest,
   UpdateChatConversationRequest,
 } from '@activepieces/shared';
 
@@ -65,6 +67,17 @@ async function deleteConversation(id: string): Promise<void> {
   });
 }
 
+async function submitFeedback(
+  conversationId: string,
+  request: SubmitChatFeedbackRequest,
+): Promise<ChatFeedback> {
+  return api.post<ChatFeedback>(
+    `/v1/chat/conversations/${conversationId}/feedback`,
+    request,
+    { projectId: projectId() },
+  );
+}
+
 export const chatApi = {
   createConversation,
   listConversations,
@@ -72,4 +85,5 @@ export const chatApi = {
   getMessages,
   updateConversation,
   deleteConversation,
+  submitFeedback,
 };

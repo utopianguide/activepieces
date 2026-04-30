@@ -74,6 +74,7 @@ function ChatBoxContent({
   chatProviderName,
 }: AIChatBoxProps) {
   const {
+    conversationId,
     messages,
     modelName,
     isStreaming,
@@ -171,6 +172,7 @@ function ChatBoxContent({
               <ChatMessage
                 key={msg.id}
                 message={msg}
+                conversationId={conversationId}
                 isStreaming={isLastStreamingAssistant}
                 isLastMessage={idx === messages.length - 1}
                 onSend={handleSend}

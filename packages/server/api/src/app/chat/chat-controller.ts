@@ -4,6 +4,7 @@ import {
     PrincipalType,
     SendChatMessageRequest,
     SERVICE_KEY_SECURITY_OPENAPI,
+    SubmitChatFeedbackRequest,
     UpdateChatConversationRequest,
 } from '@activepieces/shared'
 import { FastifyPluginAsyncZod } from 'fastify-type-provider-zod'
@@ -67,6 +68,16 @@ export const chatController: FastifyPluginAsyncZod = async (app) => {
             projectId: request.projectId,
             userId: request.principal.id,
         })
+    })
+
+    app.post('/conversations/:id/feedback', SubmitFeedbackRoute, async (request, reply) => {
+        const feedback = await chatService(request.log).submitFeedback({
+            conversationId: request.params.id,
+            projectId: request.projectId,
+            userId: request.principal.id,
+            request: request.body,
+        })
+        return reply.status(StatusCodes.CREATED).send(feedback)
     })
 
     app.post('/conversations/:id/messages', SendMessageRoute, async (request, reply) => {
@@ -210,5 +221,20 @@ const SendMessageRoute = {
         params: CONVERSATION_PARAMS,
         querystring: CONVERSATION_QUERY,
         body: SendChatMessageRequest,
+    },
+}
+
+const SubmitFeedbackRoute = {
+    config: {
+        security: securityAccess.project(CHAT_PRINCIPALS, Permission.WRITE_CHAT, {
+            type: ProjectResourceType.QUERY,
+        }),
+    },
+    schema: {
+        tags: ['chat'],
+        security: [SERVICE_KEY_SECURITY_OPENAPI],
+        params: CONVERSATION_PARAMS,
+        querystring: CONVERSATION_QUERY,
+        body: SubmitChatFeedbackRequest,
     },
 }

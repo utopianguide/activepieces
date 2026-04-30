@@ -32,6 +32,10 @@ export const ChatConversationEntity = new EntitySchema<ChatConversationWithRelat
             nullable: false,
             default: '[]',
         },
+        lastAssistantTraceId: {
+            type: String,
+            nullable: true,
+        },
     },
     indices: [
         {
