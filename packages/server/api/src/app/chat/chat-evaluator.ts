@@ -15,7 +15,8 @@ const DEFAULT_MODEL = 'claude-3-5-haiku-latest'
 const DEFAULT_PROVIDER = 'anthropic'
 const PROMPT_FIELD_TRUNCATE_CHARS = 10_000
 const POLL_LAG_MS = 5_000
-const TRACE_NAME_PREFIX = 'chat.send-message'
+const CHAT_TAG = 'chat'
+const TOP_LEVEL_GENERATION_NAME = 'chat.send-message:ai.streamText'
 
 let pollTimer: NodeJS.Timeout | null = null
 let cursor: Date | null = null
@@ -169,9 +170,13 @@ async function evaluateTrace({
     judgeModel: LanguageModel
     trace: { id: string, input?: unknown, output?: unknown }
     log: FastifyBaseLogger
-}): Promise<{ scoresWritten: number, errors: number }> {
+}): Promise<{ scoresWritten: number, errors: number, skipped: boolean }> {
+    const traceWithContent = await loadTraceContent({ client, traceId: trace.id, log })
+    if (isNil(traceWithContent)) {
+        return { scoresWritten: 0, errors: 0, skipped: true }
+    }
     const results = await Promise.allSettled(
-        CHAT_JUDGES.map((judge) => runJudge({ judge, judgeModel, trace, log })),
+        CHAT_JUDGES.map((judge) => runJudge({ judge, judgeModel, trace: traceWithContent, log })),
     )
     let scoresWritten = 0
     let errors = 0
@@ -189,7 +194,45 @@ async function evaluateTrace({
         await postScore({ client, traceId: trace.id, judge, score: result.score, reason: result.reason })
         scoresWritten++
     }
-    return { scoresWritten, errors }
+    return { scoresWritten, errors, skipped: false }
+}
+
+async function loadTraceContent({
+    client,
+    traceId,
+    log,
+}: {
+    client: Langfuse
+    traceId: string
+    log: FastifyBaseLogger
+}): Promise<{ id: string, input: unknown, output: unknown } | null> {
+    const { data, error } = await tryCatch(async () => client.fetchTrace(traceId))
+    if (error || isNil(data)) {
+        log.warn({ err: error, traceId }, 'Chat evaluator: fetchTrace failed')
+        return null
+    }
+    const trace = data.data as { id: string, input?: unknown, output?: unknown, observations?: Array<{ name?: string, input?: unknown, output?: unknown }> }
+    let input: unknown = trace.input
+    let output: unknown = trace.output
+    if (isNil(input) || isNil(output)) {
+        const top = (trace.observations ?? []).find((o) => o.name === TOP_LEVEL_GENERATION_NAME)
+        if (!isNil(top)) {
+            input = isNil(input) ? top.input : input
+            output = isNil(output) ? top.output : output
+        }
+    }
+    if (isNil(input) && isNil(output)) {
+        return null
+    }
+    return { id: traceId, input, output }
+}
+
+function isChatTrace(trace: { metadata?: unknown }): boolean {
+    if (typeof trace.metadata !== 'object' || trace.metadata === null) {
+        return false
+    }
+    const tags = (trace.metadata as Record<string, unknown>).langfuseTags
+    return Array.isArray(tags) && tags.includes(CHAT_TAG)
 }
 
 async function tick({ log }: { log: FastifyBaseLogger }): Promise<void> {
@@ -224,22 +267,28 @@ async function tick({ log }: { log: FastifyBaseLogger }): Promise<void> {
             return
         }
 
-        const chatTraces = (page.data ?? []).filter((t) => typeof t.name === 'string' && t.name.startsWith(TRACE_NAME_PREFIX))
+        const allTraces = page.data ?? []
+        const chatTraces = allTraces.filter(isChatTrace)
         if (chatTraces.length === 0) {
             cursor = toTimestamp
+            log.debug({ tracesSeen: allTraces.length, fromTimestamp, toTimestamp }, 'Chat evaluator tick: no chat traces in window')
             return
         }
 
         let scoresWritten = 0
         let errors = 0
+        let skipped = 0
         for (const trace of chatTraces) {
             const result = await evaluateTrace({ client, judgeModel, trace, log })
             scoresWritten += result.scoresWritten
             errors += result.errors
+            if (result.skipped) {
+                skipped++
+            }
         }
         await client.flushAsync().catch((err: unknown) => log.warn({ err }, 'Chat evaluator: flush failed'))
         cursor = toTimestamp
-        log.info({ tracesEvaluated: chatTraces.length, scoresWritten, errors, judges: CHAT_JUDGES.length }, 'Chat evaluator tick complete')
+        log.info({ tracesEvaluated: chatTraces.length - skipped, tracesSkipped: skipped, scoresWritten, errors, judges: CHAT_JUDGES.length }, 'Chat evaluator tick complete')
     }
     finally {
         runningTick = false

@@ -31,6 +31,8 @@ export const ChatConversation = z.object({
     modelName: Nullable(z.string()),
     messages: z.array(z.record(z.string(), z.unknown())).default([]),
     lastAssistantTraceId: Nullable(z.string()).optional(),
+    summary: Nullable(z.string()),
+    summarizedUpToIndex: Nullable(z.number().int()),
 })
 export type ChatConversation = z.infer<typeof ChatConversation>
 

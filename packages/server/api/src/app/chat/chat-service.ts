@@ -23,7 +23,7 @@ import {
 } from '@activepieces/shared'
 import { createMCPClient } from '@ai-sdk/mcp'
 import { trace } from '@opentelemetry/api'
-import { ModelMessage, stepCountIs, streamText } from 'ai'
+import { LanguageModel, ModelMessage, stepCountIs, streamText } from 'ai'
 import { FastifyBaseLogger } from 'fastify'
 import { aiProviderService } from '../ai/ai-provider-service'
 import { repoFactory } from '../core/db/repo-factory'
@@ -32,8 +32,9 @@ import { paginationHelper } from '../helper/pagination/pagination-utils'
 import { Order } from '../helper/pagination/paginator'
 import { system } from '../helper/system/system'
 import { AppSystemProp } from '../helper/system/system-props'
-import { mcpServerService } from '../mcp/mcp-service'
+import { mcpOAuthTokenService } from '../mcp/oauth/token/mcp-oauth-token.service'
 import { projectService } from '../project/project-service'
+import { chatCompaction } from './chat-compaction'
 import { ChatConversationEntity } from './chat-conversation-entity'
 import { ChatFeedbackEntity } from './chat-feedback-entity'
 import { buildUserContentWithFiles } from './chat-file-utils'
@@ -125,7 +126,7 @@ export const chatService = (log: FastifyBaseLogger) => ({
         const [conversation, providerConfig, mcpCredentials, projectName, userContent] = await Promise.all([
             this.getConversationOrThrow({ id: conversationId, projectId, userId }),
             resolveChatProvider({ platformId, log }),
-            getMcpCredentials({ projectId, log }),
+            getMcpCredentials({ platformId, userId, log }),
             projectService(log).getOneOrThrow(projectId).then((p) => p.displayName),
             buildUserContentWithFiles({ text: content, files }),
         ])
@@ -147,6 +148,23 @@ export const chatService = (log: FastifyBaseLogger) => ({
         const previousMessages = conversation.messages as ModelMessage[]
         const newUserMessage: ModelMessage = { role: 'user' as const, content: userContent }
         const allMessages = [...previousMessages, newUserMessage]
+
+        const compactionState = await resolveCompactionState({
+            conversation,
+            allMessages,
+            systemPromptLength: systemPrompt.length,
+            provider: providerConfig.provider,
+            model,
+            conversationId,
+            log,
+        })
+
+        const messagesForLlm = chatCompaction.buildCompactedPayload({
+            messages: allMessages,
+            summary: compactionState.summary,
+            summarizedUpToIndex: compactionState.summarizedUpToIndex,
+            provider: providerConfig.provider,
+        })
 
         let pendingTitle = ''
         const localTools = createChatTools({
@@ -170,7 +188,7 @@ export const chatService = (log: FastifyBaseLogger) => ({
             const result = streamText({
                 model,
                 system: systemPrompt,
-                messages: allMessages,
+                messages: messagesForLlm,
                 tools,
                 stopWhen: stepCountIs(MAX_STEPS),
                 experimental_telemetry: {
@@ -288,6 +306,45 @@ async function resolveDefaultChatModel({ platformId, provider, log }: {
     })
 }
 
+async function resolveCompactionState({ conversation, allMessages, systemPromptLength, provider, model, conversationId, log }: {
+    conversation: ChatConversation
+    allMessages: ModelMessage[]
+    systemPromptLength: number
+    provider: AIProviderName
+    model: LanguageModel
+    conversationId: string
+    log: FastifyBaseLogger
+}): Promise<{ summary: string | null, summarizedUpToIndex: number | null }> {
+    const summary = conversation.summary ?? null
+    const summarizedUpToIndex = conversation.summarizedUpToIndex ?? null
+
+    const estimatedTokens = chatCompaction.estimateTokenCount({
+        messages: allMessages,
+        systemPromptLength,
+    })
+
+    if (!chatCompaction.shouldCompact({ estimatedTokens, provider, messageCount: allMessages.length })) {
+        return { summary, summarizedUpToIndex }
+    }
+
+    const result = await chatCompaction.compactMessages({
+        messages: allMessages,
+        existingSummary: summary,
+        summarizedUpToIndex,
+        provider,
+        model,
+        log,
+    })
+
+    await conversationRepo().update(conversationId, {
+        summary: result.summary,
+        summarizedUpToIndex: result.summarizedUpToIndex,
+    })
+    log.info({ conversationId, summarizedUpToIndex: result.summarizedUpToIndex }, 'Chat compaction completed')
+
+    return result
+}
+
 async function connectMcpClient({ mcpCredentials, log }: {
     mcpCredentials: { mcpServerUrl: string | null, mcpToken: string | null }
     log: FastifyBaseLogger
@@ -312,17 +369,18 @@ async function connectMcpClient({ mcpCredentials, log }: {
     return { mcpClient: client, mcpToolSet }
 }
 
-async function getMcpCredentials({ projectId, log }: { projectId: string, log: FastifyBaseLogger }): Promise<{ mcpServerUrl: string | null, mcpToken: string | null }> {
-    const { data: mcpServer, error } = await tryCatch(async () => mcpServerService(log).getByProjectId(projectId))
+async function getMcpCredentials({ platformId, userId, log }: { platformId: string, userId: string, log: FastifyBaseLogger }): Promise<{ mcpServerUrl: string | null, mcpToken: string | null }> {
+    const { data: accessToken, error } = await tryCatch(() =>
+        mcpOAuthTokenService.issueInternalAccessToken({ userId, platformId, projectId: null }),
+    )
     if (error) {
-        log.warn({ err: error, projectId }, 'Failed to get MCP credentials — chat will work without MCP tools')
+        log.warn({ err: error, platformId }, 'Failed to get MCP credentials — chat will work without MCP tools')
         return { mcpServerUrl: null, mcpToken: null }
     }
     const frontendUrl = system.getOrThrow(AppSystemProp.FRONTEND_URL)
-    const mcpServerUrl = `${frontendUrl}/mcp`
     return {
-        mcpServerUrl,
-        mcpToken: mcpServer.token,
+        mcpServerUrl: `${frontendUrl}/mcp/platform`,
+        mcpToken: accessToken,
     }
 }
 

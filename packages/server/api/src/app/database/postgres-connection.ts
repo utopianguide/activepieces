@@ -366,7 +366,11 @@ import { AddLastLoggedInPlatformIdToUserIdentity1777491000474 } from './migratio
 import { DropChatTokenColumns1782000000000 } from './migration/postgres/1782000000000-DropChatTokenColumns'
 import { AddUserSandboxTable1784000000000 } from './migration/postgres/1784000000000-AddUserSandboxTable'
 import { ReplacesSandboxWithVercelAiSdk1785000000000 } from './migration/postgres/1785000000000-ReplacesSandboxWithVercelAiSdk'
-import { AddChatLangfuseTracing1786000000000 } from './migration/postgres/1786000000000-AddChatLangfuseTracing'
+import { AddChatCompactionColumns1786000000000 } from './migration/postgres/1786000000000-AddChatCompactionColumns'
+import { AddSsoDomainVerification1787100000000 } from './migration/postgres/1787100000000-AddSsoDomainVerification'
+import { AddChatLangfuseTracing1787500000000 } from './migration/postgres/1787500000000-AddChatLangfuseTracing'
+import { AddPlatformMcpServer1788000000000 } from './migration/postgres/1788000000000-AddPlatformMcpServer'
+import { MakeMcpOAuthProjectIdNullable1789000000000 } from './migration/postgres/1789000000000-MakeMcpOAuthProjectIdNullable'
 
 const getSslConfig = (): boolean | TlsOptions => {
     const useSsl = system.get(AppSystemProp.POSTGRES_USE_SSL)
@@ -748,7 +752,11 @@ export const getMigrations = (): (new () => Migration)[] => {
         AddUserSandboxTable1784000000000,
         AddLastLoggedInPlatformIdToUserIdentity1777491000474,
         ReplacesSandboxWithVercelAiSdk1785000000000,
-        AddChatLangfuseTracing1786000000000,
+        AddChatCompactionColumns1786000000000,
+        AddSsoDomainVerification1787100000000,
+        AddChatLangfuseTracing1787500000000,
+        AddPlatformMcpServer1788000000000,
+        MakeMcpOAuthProjectIdNullable1789000000000,
     ]
     return migrations
 }
