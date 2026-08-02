@@ -56,7 +56,7 @@ const CrashTestPage = import.meta.env.DEV
     )
   : null;
 
-const devRoutes =
+const crashTestRoutes =
   import.meta.env.DEV && CrashTestPage
     ? [
         {
@@ -69,6 +69,8 @@ const devRoutes =
         },
       ]
     : [];
+
+const devRoutes = [...crashTestRoutes];
 
 const routes = [
   ...devRoutes,
