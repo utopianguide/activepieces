@@ -1,8 +1,9 @@
 import { AIProviderName, ErrorCode, isNil, isObject, spreadIfDefined, tryCatch, tryCatchSync } from '@activepieces/core-utils'
 import { chatAiUtils } from '@activepieces/server-utils'
-import { ChatAgentEvent, ChatAgentEventType, chatConsent, ChatPhase, EngineResponseStatus, ExecuteChatAgentJobData, PersistedChatMessage, PersistedChatRole, WorkerJobType } from '@activepieces/shared'
-import { createUIMessageStream, generateText, ModelMessage, streamText, ToolSet } from 'ai'
+import { autoConsent, ChatAgentEvent, ChatAgentEventType, chatConsent, ChatPhase, EngineResponseStatus, ExecuteChatAgentJobData, PersistedChatMessage, PersistedChatRole, WorkerJobType } from '@activepieces/shared'
+import { createUIMessageStream, generateText, LanguageModel, ModelMessage, streamText, ToolSet } from 'ai'
 import { FireAndForgetJobResult, JobContext, JobHandler, JobResultKind } from '../../../types'
+import { autoConsentJudge } from './auto-consent-judge'
 import { chatMcpClient } from './chat-mcp-client'
 import { chatWorkerTools, GateDecision, TaintState } from './chat-worker-tools'
 import { delayWithJitter, isTransientFailureText, runChatTurn } from './run-chat-turn'
@@ -59,7 +60,7 @@ export const executeChatAgentJob: JobHandler<ExecuteChatAgentJobData, FireAndFor
             provider, auth: config.auth, config: config.providerConfig, modelId: config.fastModelId,
         })
 
-        log.info({ provider, model: { id: config.modelId }, tier: { id: config.tier.id }, dryRun: dryRun ?? false, tavilySearchActive, webSearchActive }, '[executeChatAgent] Chat config loaded')
+        log.info({ provider, model: { id: config.modelId }, tier: { id: config.tier.id }, dryRun: dryRun ?? false, tavilySearchActive, webSearchActive, autoConsentEnabled: config.autoConsentEnabled ?? false }, '[executeChatAgent] Chat config loaded')
 
         const eventEmitter = chatWorkerTools.createEventEmitter({
             sendEvent: (input) => ctx.apiClient.sendChatEvent({ ...input, runId }),
@@ -118,7 +119,14 @@ export const executeChatAgentJob: JobHandler<ExecuteChatAgentJobData, FireAndFor
 
         try {
             const phaseState: { phase: ChatPhase } = { phase: 'discovery' }
-            const taintState: TaintState = { tainted: false }
+            // Outside content read in an EARLIER turn is still in this conversation's history and
+            // still reachable by the model, so the taint has to carry across turns — a per-turn
+            // flag lets "fetch a page" / "now send it" walk around the guard in two messages.
+            const inheritedTaint = autoConsent.conversationReadUntrustedContent({ previousMessages: config.previousUiMessages })
+            const taintState: TaintState = { tainted: inheritedTaint }
+            if (inheritedTaint) {
+                log.info({ conversation: { id: conversationId } }, '[executeChatAgent] Turn starts tainted — this conversation already read outside content')
+            }
 
             const webTools: ToolSet = dryRun ? {} : {
                 ...chatWorkerTools.createWebTools({ taintState }),
@@ -138,6 +146,17 @@ export const executeChatAgentJob: JobHandler<ExecuteChatAgentJobData, FireAndFor
                 guides: config.guides, dryRun: dryRun ?? false, discoveryOnly: discoveryOnly ?? false,
                 emailEnabled: config.emailEnabled,
                 consentPolicy: config.consentPolicy,
+                autoConsentConfig: config.autoConsentEnabled === true && dryRun !== true && discoveryOnly !== true
+                    ? {
+                        model: chatAiUtils.createChatModel({
+                            provider, auth: config.auth, config: config.providerConfig, modelId: config.modelId,
+                        }),
+                        userRequest: autoConsent.buildUserRequestContext({
+                            previousMessages: config.previousUiMessages,
+                            currentMessage: userMessage,
+                        }),
+                    }
+                    : undefined,
                 abortSignal: abortController.signal,
             })
 
@@ -160,6 +179,12 @@ export const executeChatAgentJob: JobHandler<ExecuteChatAgentJobData, FireAndFor
                 allToolNames,
                 tier: config.tier,
                 phaseState,
+                onUntrustedContent: () => {
+                    if (!taintState.tainted) {
+                        log.info({ conversation: { id: conversationId } }, '[executeChatAgent] Turn tainted by a cited source — outside content entered this turn')
+                    }
+                    taintState.tainted = true
+                },
                 abortSignal: abortController.signal,
                 log,
                 sinks: {
@@ -333,7 +358,7 @@ export const executeChatAgentJob: JobHandler<ExecuteChatAgentJobData, FireAndFor
     },
 }
 
-function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolSet, webTools, projects, projectId, conversationId, runId, platformId, userId, userEmail, guides, dryRun, discoveryOnly, emailEnabled, consentPolicy, abortSignal }: {
+function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolSet, webTools, projects, projectId, conversationId, runId, platformId, userId, userEmail, guides, dryRun, discoveryOnly, emailEnabled, consentPolicy, autoConsentConfig, abortSignal }: {
     ctx: JobContext
     eventEmitter: ReturnType<typeof chatWorkerTools.createEventEmitter>
     log: JobContext['log']
@@ -353,17 +378,20 @@ function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolS
     discoveryOnly: boolean
     emailEnabled: boolean
     consentPolicy?: Record<string, string>
+    autoConsentConfig?: { model: LanguageModel, userRequest: string }
     abortSignal: AbortSignal
 }) {
     const policy = chatConsent.composePolicy({ fullAccess: false, overrides: consentPolicy })
     const brokenConnectors = new Set<string>()
 
-    const auditPolicyDenied = async ({ toolName, displayName, effectKinds }: { toolName: string, displayName?: string, effectKinds?: string[] }) => {
+    const sendConsentAudit = async ({ outcome, toolName, displayName, effectKinds, reason }: { outcome: 'policy_denied' | 'auto_approved', toolName: string, displayName?: string, effectKinds?: string[], reason?: string }) => {
         await tryCatch(() => ctx.apiClient.executeChatTool({
             toolName: '__consent_audit',
             toolInput: {
+                outcome,
                 tool: toolName,
                 ...spreadIfDefined('displayName', displayName),
+                ...spreadIfDefined('reason', reason),
                 ...(!isNil(effectKinds) && effectKinds.length > 0 ? { effectKinds } : {}),
             },
             platformId,
@@ -371,6 +399,28 @@ function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolS
             conversationId,
         }))
     }
+
+    const auditPolicyDenied = async ({ toolName, displayName, effectKinds }: { toolName: string, displayName?: string, effectKinds?: string[] }) => {
+        await sendConsentAudit({ outcome: 'policy_denied', toolName, displayName, effectKinds })
+    }
+
+    if (!isNil(autoConsentConfig)) {
+        log.info({ conversation: { id: conversationId } }, '[buildToolSet] Auto-consent judge active for this turn')
+    }
+    const autoJudge = isNil(autoConsentConfig) ? undefined : autoConsentJudge.createAutoConsentJudge({
+        model: autoConsentConfig.model,
+        userRequest: autoConsentConfig.userRequest,
+        onVerdict: async ({ request, verdict }) => {
+            await sendConsentAudit({
+                outcome: 'auto_approved',
+                toolName: request.toolName,
+                displayName: request.actionLabel,
+                effectKinds: request.kinds,
+                reason: verdict.reason,
+            })
+        },
+        log,
+    })
 
     const executeCrossProjectTool = async (toolName: string, toolInput: Record<string, unknown>) => {
         if (dryRun) {
@@ -467,7 +517,7 @@ function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolS
         onConnectorReconnected: (connectorUuid) => brokenConnectors.delete(connectorUuid),
         onGateOpened: storePendingGate,
     })
-    const crossProjectTools = chatWorkerTools.createCrossProjectTools({ executeTool: executeCrossProjectTool, eventEmitter, waitForApproval, onGateOpened: storePendingGate, guides, taintState, policy, auditPolicyDenied, log })
+    const crossProjectTools = chatWorkerTools.createCrossProjectTools({ executeTool: executeCrossProjectTool, eventEmitter, waitForApproval, onGateOpened: storePendingGate, guides, taintState, policy, auditPolicyDenied, autoJudge, log })
     const thinkingTools = chatWorkerTools.createThinkingTools()
     const phaseTools = chatWorkerTools.createPhaseTools({ onPhaseChange: (phase) => {
         phaseState.phase = phase
@@ -497,6 +547,8 @@ function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolS
             onGateOpened: storePendingGate,
             policy,
             auditPolicyDenied,
+            autoJudge,
+            taintState,
             log,
         })
         : {}
@@ -536,6 +588,8 @@ function buildToolSet({ ctx, eventEmitter, log, phaseState, taintState, mcpToolS
         waitForApproval,
         storePendingGate,
         eventEmitter,
+        autoJudge,
+        taintState,
         log,
     })
 }

@@ -1,6 +1,6 @@
-import { chunk, isNil, isObject, spreadIfDefined, tryCatch, tryCatchSync } from '@activepieces/core-utils'
+import { chunk, isNil, isObject, spreadIfDefined, tryCatch, tryCatchSync, unique } from '@activepieces/core-utils'
 import { safeHttp } from '@activepieces/server-utils'
-import { actionEffect, ActionEffectKind, actionEffectLabelCatalog, ActionPreviewEvent, ActionReceiptEvent, apId, BatchItemResult, BuildPlanEvent, ChatAgentEventType, chatConsent, ChatPhase, chatToolClassification, ChatToolConsentSpec, chatToolConsentSpecs, ConsentDecision, ConsentPreview, ConsentPreviewCategory, ConsentSeverity, FileProducedEvent, ImageGeneratedEvent, SaveChatFileResponse, SendChatEmailResponse, SendChatEventRequest, StepEffect, ToolProgressEvent } from '@activepieces/shared'
+import { actionEffect, ActionEffectKind, actionEffectLabelCatalog, ActionPreviewEvent, ActionReceiptEvent, apId, autoConsent, AutoConsentJudge, AutoConsentVerdict, BatchItemResult, BuildPlanEvent, ChatAgentEventType, chatConsent, ChatPhase, chatToolClassification, ChatToolConsentSpec, chatToolConsentSpecs, ConsentDecision, ConsentPreview, ConsentPreviewCategory, ConsentSeverity, FileProducedEvent, ImageGeneratedEvent, SaveChatFileResponse, SendChatEmailResponse, SendChatEventRequest, StepEffect, ToolProgressEvent } from '@activepieces/shared'
 import { tool, ToolExecutionOptions, ToolSet } from 'ai'
 import { stripHtml } from 'string-strip-html'
 import { z } from 'zod'
@@ -562,7 +562,7 @@ function createProgressGuard() {
     }
 }
 
-function createCrossProjectTools({ executeTool, eventEmitter, waitForApproval, onGateOpened, guides, taintState, policy, auditPolicyDenied, log }: {
+function createCrossProjectTools({ executeTool, eventEmitter, waitForApproval, onGateOpened, guides, taintState, policy, auditPolicyDenied, autoJudge, log }: {
     executeTool: (toolName: string, toolInput: Record<string, unknown>) => Promise<unknown>
     eventEmitter: ChatEventEmitter
     waitForApproval: (params: { gateId: string, timeoutMs?: number }) => Promise<GateDecision>
@@ -571,6 +571,7 @@ function createCrossProjectTools({ executeTool, eventEmitter, waitForApproval, o
     taintState: TaintState
     policy?: Partial<Record<ActionEffectKind, ConsentDecision>>
     auditPolicyDenied?: AuditPolicyDenied
+    autoJudge?: AutoConsentJudge
     log?: ChatToolLogger
 }): ToolSet {
     ensureEffectCatalog()
@@ -641,7 +642,30 @@ function createCrossProjectTools({ executeTool, eventEmitter, waitForApproval, o
                     return policyDeniedResult(toolInput.actionName)
                 }
 
-                if (consentDecision === 'ask') {
+                let autoVerdict: AutoConsentVerdict | undefined
+                if (consentDecision === 'ask' && !isNil(autoJudge)) {
+                    const batchInputs = isBatch ? toolInput.items! : [toolInput.input ?? {}]
+                    const kinds = unique(batchInputs.map((itemInput) => actionEffect.resolve({
+                        pieceName: toolInput.pieceName,
+                        actionName: toolInput.actionName,
+                        input: itemInput,
+                    }).kind))
+                    const canJudge = autoConsent.judgeable({ kinds })
+                    if (canJudge) {
+                        const { data: verdict } = await tryCatch(() => autoJudge({
+                            toolName: 'ap_execute_action',
+                            actionLabel: toolInput.title ?? toolInput.actionName,
+                            kinds,
+                            input: isBatch ? { firstItems: toolInput.items!.slice(0, autoConsent.MAX_BATCH_CONTENT_SAMPLES) } : (toolInput.input ?? {}),
+                            ...spreadIfDefined('batchSummary', isBatch ? autoConsent.summarizeBatch({ items: toolInput.items! }) : undefined),
+                            tainted: taintState.tainted,
+                        }))
+                        if (verdict?.decision === 'run') {
+                            autoVerdict = verdict
+                        }
+                    }
+                }
+                if (consentDecision === 'ask' && isNil(autoVerdict)) {
                     const previewData: ActionPreviewEvent = {
                         toolCallId: options.toolCallId,
                         pieceName: toolInput.pieceName,
@@ -709,6 +733,15 @@ function createCrossProjectTools({ executeTool, eventEmitter, waitForApproval, o
                     actionName: toolInput.actionName,
                     input: toolInput.input,
                 })
+                // Any successful call into a connected app hands third-party content back to the
+                // model — an inbound email, a record someone else wrote, a page of comments. That
+                // content is an injection vector whether or not the catalog happens to label the
+                // action a read, so the taint cannot be keyed on that label: `gmail search_mail`
+                // is labelled `outward_send` today, and keying on the label would have left
+                // exactly the read-then-send path open.
+                if (rawSuccess) {
+                    taintState.tainted = true
+                }
                 if (!isReadOnly) {
                     eventEmitter.emitActionReceipt({
                         toolCallId: options.toolCallId,
@@ -719,6 +752,7 @@ function createCrossProjectTools({ executeTool, eventEmitter, waitForApproval, o
                         output: result,
                         errorMessage: !rawSuccess ? extractUserFacingError({ result: rawResult, meta }) : undefined,
                         timestamp: new Date().toISOString(),
+                        ...(isNil(autoVerdict) ? {} : { autoApproved: true, autoReason: autoVerdict.reason }),
                     })
                 }
                 return result
@@ -1034,7 +1068,7 @@ function createImageTools({ imageGeneration, saveFile, emitImage }: {
     }
 }
 
-function createEmailTools({ sendEmail, eventEmitter, userEmail, waitForApproval, onGateOpened, policy, auditPolicyDenied, log }: {
+function createEmailTools({ sendEmail, eventEmitter, userEmail, waitForApproval, onGateOpened, policy, auditPolicyDenied, autoJudge, taintState, log }: {
     sendEmail: (params: { to: string[], subject: string, body: string, gateId?: string }) => Promise<SendChatEmailResponse>
     eventEmitter: ChatEventEmitter
     userEmail: string
@@ -1042,6 +1076,8 @@ function createEmailTools({ sendEmail, eventEmitter, userEmail, waitForApproval,
     onGateOpened?: (params: { gateId: string, toolName: string, displayName: string, toolInput: Record<string, unknown> }) => Promise<void>
     policy?: Partial<Record<ActionEffectKind, ConsentDecision>>
     auditPolicyDenied?: AuditPolicyDenied
+    autoJudge?: AutoConsentJudge
+    taintState?: TaintState
     log?: ChatToolLogger
 }): ToolSet {
     const normalizedSelf = userEmail.toLowerCase().trim()
@@ -1065,7 +1101,20 @@ function createEmailTools({ sendEmail, eventEmitter, userEmail, waitForApproval,
                 // Require user approval for any non-self recipient — injected content (a fetched page
                 // or tool result) could otherwise steer the model into emailing data to an attacker.
                 const hasExternalRecipient = toolInput.to.some((email) => email.toLowerCase().trim() !== normalizedSelf)
-                if (hasExternalRecipient) {
+                let autoVerdict: AutoConsentVerdict | undefined
+                if (hasExternalRecipient && !isNil(autoJudge) && autoConsent.judgeable({ kinds: ['outward_send'] })) {
+                    const { data: verdict } = await tryCatch(() => autoJudge({
+                        toolName: 'ap_send_email',
+                        actionLabel: displayName,
+                        kinds: ['outward_send'],
+                        input: { to: toolInput.to, subject: toolInput.subject, body: toolInput.body },
+                        tainted: taintState?.tainted,
+                    }))
+                    if (verdict?.decision === 'run') {
+                        autoVerdict = verdict
+                    }
+                }
+                if (hasExternalRecipient && isNil(autoVerdict)) {
                     const previewData: ActionPreviewEvent = {
                         toolCallId: options.toolCallId,
                         pieceName: 'email',
@@ -1107,6 +1156,7 @@ function createEmailTools({ sendEmail, eventEmitter, userEmail, waitForApproval,
                     output: { content: [{ type: 'text', text: message }] },
                     errorMessage: sent ? undefined : message,
                     timestamp: new Date().toISOString(),
+                    ...(isNil(autoVerdict) ? {} : { autoApproved: true, autoReason: autoVerdict.reason }),
                 })
                 return { content: [{ type: 'text', text: message }] }
             },
@@ -1606,7 +1656,7 @@ function gateLabelFor({ toolName, spec, flowName, effects, resolved, resolvedTar
     return summary.length > 0 ? `${intro} ${target} — performs: ${summary}` : `${intro} ${target}`
 }
 
-function wrapWithConsent<T extends Record<string, unknown>>({ tools, disabled, policy, previewFlowEffects, resolveTargetName, checkRememberedConsent, rememberConsent, waitForApproval, storePendingGate, eventEmitter, auditPolicyDenied, log }: {
+function wrapWithConsent<T extends Record<string, unknown>>({ tools, disabled, policy, previewFlowEffects, resolveTargetName, checkRememberedConsent, rememberConsent, waitForApproval, storePendingGate, eventEmitter, auditPolicyDenied, autoJudge, taintState, log }: {
     tools: T
     disabled?: boolean
     policy?: Partial<Record<ActionEffectKind, ConsentDecision>>
@@ -1618,6 +1668,8 @@ function wrapWithConsent<T extends Record<string, unknown>>({ tools, disabled, p
     storePendingGate: (params: { gateId: string, toolName: string, displayName: string, toolInput: Record<string, unknown> }) => Promise<void>
     eventEmitter: ChatEventEmitter
     auditPolicyDenied?: AuditPolicyDenied
+    autoJudge?: AutoConsentJudge
+    taintState?: TaintState
     log?: ChatToolLogger
 }): T {
     ensureEffectCatalog()
@@ -1633,7 +1685,14 @@ function wrapWithConsent<T extends Record<string, unknown>>({ tools, disabled, p
         if (!isObject(tool) || !toolHasExecute(tool)) {
             continue
         }
-        const originalExecute = tool.execute.bind(tool)
+        const rawExecute = tool.execute.bind(tool)
+        const originalExecute = async (args: unknown, options?: ToolExecutionOptions) => {
+            const result = await rawExecute(args, options)
+            if (!isNil(taintState) && autoConsent.toolReadsUntrustedContent(toolName)) {
+                taintState.tainted = true
+            }
+            return result
+        }
         Object.assign(wrapped, { [toolName]: Object.assign({}, tool, {
             execute: async (args: unknown, options?: ToolExecutionOptions) => {
                 const gateId = options?.toolCallId
@@ -1671,6 +1730,22 @@ function wrapWithConsent<T extends Record<string, unknown>>({ tools, disabled, p
                     const remembered = await tryCatch(() => checkRememberedConsent({ signature }))
                     if (remembered.data === true) {
                         log?.info?.({ tool: { name: toolName }, gate: { id: gateId } }, 'Consent reused from earlier approval in this conversation')
+                        return originalExecute(args, options)
+                    }
+                }
+                if (!isNil(autoJudge) && autoConsent.judgeable({ kinds, resolved })) {
+                    const { data: verdict } = await tryCatch(() => autoJudge({
+                        toolName,
+                        actionLabel: gateLabelFor({ toolName, spec, flowName, effects, resolved }),
+                        kinds,
+                        input: {
+                            args: isObject(args) ? args : {},
+                            willDo: effects.map((step) => ({ step: step.stepName, does: chatConsent.describeEffect(step.effect.kind) })),
+                        },
+                        tainted: taintState?.tainted,
+                    }))
+                    if (verdict?.decision === 'run') {
+                        log?.info?.({ tool: { name: toolName }, gate: { id: gateId }, judge: { reason: verdict.reason } }, 'Consent auto-approved by auto mode judge')
                         return originalExecute(args, options)
                     }
                 }
