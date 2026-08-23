@@ -132,6 +132,7 @@ export type AgentAiToolsConfig = {
     webSearch?: ResolvedAiToolConfig
     webScraping?: ResolvedAiToolConfig
     imageGeneration?: ResolvedAiToolConfig
+    platformKnowledge?: ResolvedAiToolConfig
 }
 
 export type AgentConfigResponse = {
